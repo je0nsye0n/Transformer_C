@@ -42,7 +42,7 @@ ImageData* load_image_data(const char *filename) {
     int c = header[1];
     int h = header[2];
     int w = header[3];
-    printf("Loaded image shape: [%d, %d, %d, %d]\n", n, c, h, w);
+    //printf("Loaded image shape: [%d, %d, %d, %d]\n", n, c, h, w);
     
     // 전체 요소 개수 계산: N x C x H x W
     long long total = (long long)n * c * h * w;
