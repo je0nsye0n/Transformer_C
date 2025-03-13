@@ -71,19 +71,40 @@ void flatten_transpose(float *input, float *output){
     }
 }
 
+void class_token(float *patch_tokens, float *final_tokens) {
+    // 이미지의 패치 수 계산: output_size = img_size / patch_size, num_patches = output_size^2
+    int output_size = img_size / patch_size;
+    int num_patches = output_size * output_size;
+    
+    // 1. 첫 번째 토큰에 class token 복사 (networks[0].data에 저장됨, embed_dim 길이)
+    for (int j = 0; j < embed_dim; j++){
+        final_tokens[j] = networks[0].data[j];
+    }
+    
+    // 2. 이후 patch_tokens를 이어붙임
+    // final_tokens의 인덱스 embed_dim부터, patch_tokens 전체(embed_dim * num_patches) 복사
+    memcpy(final_tokens + embed_dim, patch_tokens, sizeof(float) * embed_dim * num_patches);
+
+    int total_tokens = num_patches + 1; // class token + patch tokens
+    for (int i = 0; i < total_tokens * embed_dim; i++){
+        printf("%f ", final_tokens[i]);
+    }
+    printf("\n");
+}
 
 ////////////////////////////////////// layer별 size //////////////////////////////////////
 const int size[] = {
     embed_dim * (img_size/patch_size) * (img_size/patch_size), // Conv2D
-    embed_dim * (img_size / patch_size) * (img_size / patch_size) // flatten and transpose
+    embed_dim * (img_size / patch_size) * (img_size / patch_size), // flatten and transpose
+    embed_dim * ((img_size / patch_size) * (img_size / patch_size)+1)
 };
 
 void ViT_seq(ImageData *image, Weight *network){
     networks = network;
 
-    float *layer[2];
+    float *layer[3];
 
-    for(int i=0; i<2; i++){
+    for(int i=0; i<3; i++){
         layer[i] = (float*)malloc(sizeof(float)*size[i]);
     }
 
@@ -98,5 +119,8 @@ void ViT_seq(ImageData *image, Weight *network){
         
         /*flatten and transpose*/
         flatten_transpose(layer[0], layer[1]);
+
+        /*prepend class token*/
+        class_token(layer[1], layer[2]);
     }
 }
