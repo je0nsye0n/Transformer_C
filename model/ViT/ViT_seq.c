@@ -92,19 +92,40 @@ void class_token(float *patch_tokens, float *final_tokens) {
     printf("\n");
 }
 
+void pos_emb(float *input, float *output) {
+    // output_size: 한 변의 패치 수, num_patches: 전체 패치 수, total_tokens: class token + patch tokens
+    int output_size = img_size / patch_size;
+    int num_patches = output_size * output_size;
+    int total_tokens = num_patches + 1;
+    int total_elements = total_tokens * embed_dim;
+    
+    // networks[3].data에 positional embedding이 저장되어 있다고 가정 (flatten된 배열, 길이 = total_elements)
+    // 각 원소별로 input과 positional embedding을 더함
+    for (int i = 0; i < total_elements; i++) {
+        output[i] = input[i] + networks[3].data[i];
+    }
+    
+    // 덧셈 결과를 출력 (검증용)
+    for (int i = 0; i < total_elements; i++){
+        printf("%f ", output[i]);
+    }
+    printf("\n");
+}
+
 ////////////////////////////////////// layer별 size //////////////////////////////////////
 const int size[] = {
-    embed_dim * (img_size/patch_size) * (img_size/patch_size), // Conv2D
+    embed_dim * (img_size/patch_size) * (img_size/patch_size), // conv2D
     embed_dim * (img_size / patch_size) * (img_size / patch_size), // flatten and transpose
-    embed_dim * ((img_size / patch_size) * (img_size / patch_size)+1)
+    embed_dim * ((img_size / patch_size) * (img_size / patch_size)+1), // class token
+    embed_dim * ((img_size / patch_size) * (img_size / patch_size)+1) // position embedding
 };
 
 void ViT_seq(ImageData *image, Weight *network){
     networks = network;
 
-    float *layer[3];
+    float *layer[4];
 
-    for(int i=0; i<3; i++){
+    for(int i=0; i<4; i++){
         layer[i] = (float*)malloc(sizeof(float)*size[i]);
     }
 
@@ -122,5 +143,8 @@ void ViT_seq(ImageData *image, Weight *network){
 
         /*prepend class token*/
         class_token(layer[1], layer[2]);
+
+        /*position embedding*/
+        pos_emb(layer[2], layer[3]);
     }
 }
