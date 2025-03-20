@@ -17,18 +17,16 @@
 #define drop_path_rate 0.0
 #define eps 1e-6
 #define M_PI 3.14159265358979323846
-Weight *networks;
 
-/* Conv2d : stride 및 kernel size가 patch_size와 같으므로 패치 임베딩 역할 */
-// 입력 : input, shape = (in_chans, img_size, img_size)
-// 출력 : output, shape = (emb_dim, img_size/patch_size, img_size/patch_size)
-void Conv2d(float *input, float *output){ 
+////////////////////////////////////// ViT function //////////////////////////////////////
+
+void Conv2d(float *input, float *output, Network weight, Network bias){ 
     int output_size = img_size / patch_size;
 
     for(int oc=0; oc<embed_dim; ++oc){
         for(int oh=0; oh<output_size; ++oh){
             for(int ow=0; ow<output_size; ++ow){
-                float sum = networks[2].data[oc];
+                float sum = bias.data[oc];
 
                 for(int ic=0; ic<in_chans; ++ic){
                     for(int kh=0; kh<patch_size; ++kh){
@@ -38,7 +36,7 @@ void Conv2d(float *input, float *output){
                             int input_idx = (ic*img_size + ih) * img_size + iw;
                             int kernel_idx = ((oc*in_chans + ic) * patch_size + kh) * patch_size + kw;
 
-                            sum += input[input_idx] * networks[1].data[kernel_idx];
+                            sum += input[input_idx] * weight.data[kernel_idx];
                         }
                     }
                 }
@@ -51,9 +49,6 @@ void Conv2d(float *input, float *output){
     }
 }
 
-/* flatten_transpose : Conv2d의 출력을 flatten하고 transpose하는 과정 */
-// 출력: output, shape: (num_patches, embed_dim)
-// 여기서 output_size = img_size/patch_size, num_patches = output_size * output_size
 void flatten_transpose(float *input, float *output){
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
@@ -74,14 +69,14 @@ void flatten_transpose(float *input, float *output){
     }
 }
 
-void class_token(float *patch_tokens, float *final_tokens) {
+void class_token(float *patch_tokens, float *final_tokens, Network cls_tk) {
     // 이미지의 패치 수 계산: output_size = img_size / patch_size, num_patches = output_size^2
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
     
     // 1. 첫 번째 토큰에 class token 복사 (networks[0].data에 저장됨, embed_dim 길이)
     for (int j = 0; j < embed_dim; j++){
-        final_tokens[j] = networks[0].data[j];
+        final_tokens[j] = cls_tk.data[j];
     }
     
     // 2. 이후 patch_tokens를 이어붙임
@@ -95,7 +90,7 @@ void class_token(float *patch_tokens, float *final_tokens) {
     //printf("\n");
 }
 
-void pos_emb(float *input, float *output) {
+void pos_emb(float *input, float *output, Network pos_emb) {
     // output_size: 한 변의 패치 수, num_patches: 전체 패치 수, total_tokens: class token + patch tokens
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
@@ -105,11 +100,11 @@ void pos_emb(float *input, float *output) {
     // networks[3].data에 positional embedding이 저장되어 있다고 가정 (flatten된 배열, 길이 = total_elements)
     // 각 원소별로 input과 positional embedding을 더함
     for (int i = 0; i < total_elements; i++) {
-        output[i] = input[i] + networks[3].data[i];
+        output[i] = input[i] + pos_emb.data[i];
     }
 }
 
-void layer_norm(float *input, float *output, float *weight, float *bias){
+void layer_norm(float *input, float *output, Network weight, Network bias){
     int token = ((img_size/patch_size) * (img_size/patch_size)) + 1;
     
     for(int t=0; t<token; t++){
@@ -124,38 +119,41 @@ void layer_norm(float *input, float *output, float *weight, float *bias){
         float inv_std = 1.0f / sqrtf(var + eps);
         for(int i=0; i<embed_dim; i++){
             int idx = t * embed_dim + i;
-            output[idx] = (input[idx] - mean) * inv_std * weight[i] + bias[i];
+            output[idx] = (input[idx] - mean) * inv_std * weight.data[i] + bias.data[i];
         }
     }
 }
 
-void multihead_attn(float *input, float *output, float *in_weight, float *in_bias, float *out_weight, float *out_bias){
-    int head_dim = embed_dim / num_heads, total_dim = embed_dim, tokens = ((img_size/patch_size) * (img_size/patch_size)) + 1;
+
+void multihead_attn(float *input, float *output, 
+                    Network in_weight, Network in_bias, Network out_weight, Network out_bias){
+    int head_dim = embed_dim / num_heads, tokens = ((img_size/patch_size) * (img_size/patch_size)) + 1;
+    int Q_dim = 0, K_dim = embed_dim, V_dim = embed_dim * 2;
 
     /*Allocate Q, K, V : tokens * dim*/
-    float *Q = (float*)malloc(sizeof(float)* tokens * total_dim);
-    float *K = (float*)malloc(sizeof(float)* tokens * total_dim);
-    float *V = (float*)malloc(sizeof(float)* tokens * total_dim);
+    float *Q = (float*)malloc(sizeof(float)* tokens * embed_dim);
+    float *K = (float*)malloc(sizeof(float)* tokens * embed_dim);
+    float *V = (float*)malloc(sizeof(float)* tokens * embed_dim);
 
     /*Q, K, V 구하기*/
     for(int t=0; t<tokens; t++){
         float sum_q, sum_k, sum_v;
-        for(int i=0; i<total_dim; i++){
-            sum_q = in_bias[i], sum_k = in_bias[total_dim + i], sum_v = in_bias[total_dim*2 + i];
-            for(int j=0; j<total_dim; j++){
-                sum_q += input[t*total_dim + j] * in_weight[i*total_dim + j];
-                sum_k += input[t*total_dim + j] * in_weight[(i+total_dim)*total_dim + j];
-                sum_v += input[t*total_dim + j] * in_weight[(i+total_dim*2)*total_dim + j];
+        for(int i=0; i<embed_dim; i++){
+            sum_q = in_bias.data[Q_dim + i], sum_k = in_bias.data[K_dim + i], sum_v = in_bias.data[V_dim + i];
+            for(int j=0; j<embed_dim; j++){
+                sum_q += input[t*embed_dim + j] * in_weight.data[(Q_dim+i) * embed_dim + j];
+                sum_k += input[t*embed_dim + j] * in_weight.data[(K_dim+i) * embed_dim + j];
+                sum_v += input[t*embed_dim + j] * in_weight.data[(V_dim+i) * embed_dim + j];
             }
-            Q[t * total_dim + i] = sum_q;
-            K[t * total_dim + i] = sum_k;
-            V[t * total_dim + i] = sum_v;
+            Q[t * embed_dim + i] = sum_q;
+            K[t * embed_dim + i] = sum_k;
+            V[t * embed_dim + i] = sum_v;
         }
     }
 
     /*Attn 결과를 저장할 버퍼*/
-    float *attn_output = (float*)malloc(sizeof(float)* tokens * total_dim);
-    for (int i = 0; i < tokens * total_dim; i++) attn_output[i] = 0.0f;
+    float *attn_output = (float*)malloc(sizeof(float)* tokens * embed_dim);
+    for (int i = 0; i < tokens * embed_dim; i++) attn_output[i] = 0.0f;
 
     /*head별로 attn 수행*/
     for(int h=0; h<num_heads; h++){
@@ -169,8 +167,8 @@ void multihead_attn(float *input, float *output, float *in_weight, float *in_bia
             for(int j=0; j<tokens; j++){
                 float score = 0.0f;
                 for(int d=0; d<head_dim; d++){
-                    float q = Q[i * total_dim + head_offset + d];
-                    float k = K[j * total_dim + head_offset + d];
+                    float q = Q[i * embed_dim + head_offset + d];
+                    float k = K[j * embed_dim + head_offset + d];
                     score += q * k;                    
                 }
                 scores[i * tokens + j] = score / sqrtf((float)head_dim);
@@ -198,7 +196,7 @@ void multihead_attn(float *input, float *output, float *in_weight, float *in_bia
             for (int d = 0; d < head_dim; d++){
                 float sum = 0.0f;
                 for (int j = 0; j < tokens; j++){
-                    sum += scores[i * tokens + j] * V[j * total_dim + head_offset + d];
+                    sum += scores[i * tokens + j] * V[j * embed_dim + head_offset + d];
                 }
                 head_out[i * head_dim + d] = sum;
             }
@@ -206,7 +204,7 @@ void multihead_attn(float *input, float *output, float *in_weight, float *in_bia
         // head_out를 attn_output의 해당 부분에 복사
         for (int i = 0; i < tokens; i++){
             for (int d = 0; d < head_dim; d++){
-                attn_output[i * total_dim + head_offset + d] = head_out[i * head_dim + d];
+                attn_output[i * embed_dim + head_offset + d] = head_out[i * head_dim + d];
             }
         }
         free(scores);
@@ -217,20 +215,19 @@ void multihead_attn(float *input, float *output, float *in_weight, float *in_bia
 
     // 최종 선형 프로젝션
     for (int t = 0; t < tokens; t++){
-        for (int i = 0; i < total_dim; i++){
-            float sum = out_bias[i];
-            for (int j = 0; j < total_dim; j++){
-                sum += attn_output[t * total_dim + j] * out_weight[i * total_dim + j];
+        for (int i = 0; i < embed_dim; i++){
+            float sum = out_bias.data[i];
+            for (int j = 0; j < embed_dim; j++){
+                sum += attn_output[t * embed_dim + j] * out_weight.data[i * embed_dim + j];
             }
-            output[t * total_dim + i] = sum;
+            output[t * embed_dim + i] = sum;
         }
     }
     free(attn_output);    
 }
 
-// GELU 활성화 함수 (근사식)
 float gelu(float x) {
-    return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f/M_PI) * (x + 0.044715f * x * x * x)));
+    return 0.5f * x * (1.0f + erff(x / sqrtf(2.0f)));
 }
 void gelu_activation(float *input, float *output, int size) {
     for (int i = 0; i < size; i++){
@@ -238,19 +235,19 @@ void gelu_activation(float *input, float *output, int size) {
     }
 }
 
-void linear_layer(float *input, float *output, int tokens, int in_features, int out_features, float *weight, float *bias) {
+void linear_layer(float *input, float *output, int tokens, int in_features, int out_features, Network weight, Network bias) {
     for (int t = 0; t < tokens; t++){
         for (int o = 0; o < out_features; o++){
-            float sum = bias[o];
+            float sum = bias.data[o];
             for (int i = 0; i < in_features; i++){
-                sum += input[t * in_features + i] * weight[i * out_features + o];
+                sum += input[t * in_features + i] * weight.data[o * in_features + i];
             }
             output[t * out_features + o] = sum;
         }
     }
 }
 
-void mlp_block(float *input, float *output,  float *fc1_weight, float *fc1_bias, float *fc2_weight, float *fc2_bias){
+void mlp_block(float *input, float *output,  Network fc1_weight, Network fc1_bias, Network fc2_weight, Network fc2_bias){
     int tokens = ((img_size/patch_size) * (img_size/patch_size)) + 1, hidden_dim = ((int)(embed_dim*mlp_ratio));
     float *fc1_out = (float*)malloc(sizeof(float) * tokens * hidden_dim);
 
@@ -264,44 +261,62 @@ void mlp_block(float *input, float *output,  float *fc1_weight, float *fc1_bias,
     free(fc1_out);
 }
 
-void Encoder(float *input, float *output, int idx){
-    int tokens = ((img_size/patch_size)*(img_size/patch_size)) + 1;
-    
-    if(idx < depth){
-        int base = 4 + idx * 12;
+////////////////////////////////////// Encoder Architecture //////////////////////////////////////
+void Encoder(float *input, float *output,
+            Network ln1_w, Network ln1_b, Network attn_w, Network attn_b, Network attn_out_w, Network attn_out_b,
+            Network ln2_w, Network ln2_b, Network mlp1_w, Network mlp1_b, Network mlp2_w, Network mlp2_b){
+    int tokens =  ((img_size/patch_size)*(img_size/patch_size)) + 1;
+    float *ln1_out = (float*)malloc(sizeof(float) * tokens * embed_dim);
+    float *attn_out = (float*)malloc(sizeof(float) * tokens * embed_dim); 
+    float *residual = (float*)malloc(sizeof(float) * tokens * embed_dim);
+    float *ln2_out = (float*)malloc(sizeof(float) * tokens * embed_dim);
+    float *mlp_out = (float*)malloc(sizeof(float) * tokens * embed_dim);   
 
-        // 임시 버퍼 할당
-        float *ln1_out   = (float*)malloc(sizeof(float) * tokens * embed_dim);
-        float *attn_out  = (float*)malloc(sizeof(float) * tokens * embed_dim);
-        float *residual  = (float*)malloc(sizeof(float) * tokens * embed_dim);
-        float *ln2_out   = (float*)malloc(sizeof(float) * tokens * embed_dim);
-        float *mlp_out   = (float*)malloc(sizeof(float) * tokens * embed_dim);
+    /*LN1*/
+    layer_norm(input, ln1_out, ln1_w, ln1_b);
 
-        // LN1 : 입력에 대해 LayerNorm 적용
-        layer_norm(input, ln1_out, networks[base].data, networks[base+1].data);
+    /*Attn*/
+    multihead_attn(ln1_out, attn_out, attn_w, attn_b, attn_out_w, attn_out_b);
 
-        // MHA
-        multihead_attn(ln1_out, attn_out, networks[base+2].data, networks[base+3].data, networks[base+4].data, networks[base+5].data);
+    /*Residual1*/
+    for(int i=0; i<tokens * embed_dim; i++){
+        residual[i] = input[i] + attn_out[i];
+    }
 
-        // Residual1
-        for(int i=0; i<tokens * embed_dim; i++){
-            residual[i] = input[i] + attn_out[i];
-        }
+    /*LN2*/
+    layer_norm(residual, ln2_out, ln2_w, ln2_b);
 
-        // LN2
-        layer_norm(residual, ln2_out, networks[base+6].data, networks[base+7].data);
+    /*MLP*/
+    mlp_block(ln2_out, mlp_out, mlp1_w, mlp1_b, mlp2_w, mlp2_b);
 
-        // MLP
-        mlp_block(ln2_out, mlp_out, networks[base+8].data, networks[base+9].data, networks[base+10].data, networks[base+11].data);
-
-        // Residual2
-        for (int i = 0; i < tokens * embed_dim; i++){
-            output[i] = residual[i] + mlp_out[i];
-        }
-        free(ln1_out); free(attn_out); free(residual); free(ln2_out); free(mlp_out);    
+    /*Residual2*/
+    for (int i = 0; i < tokens * embed_dim; i++){
+        output[i] = residual[i] + mlp_out[i];
     }
     
+    free(ln1_out); free(attn_out); free(residual); free(ln2_out); free(mlp_out);    
+}
 
+void Softmax(float *logits, float *probabilities, int length){
+    // 수치 안정성을 위한 최대값 계산
+    float max_val = logits[0];
+    for (int i = 1; i < length; i++) {
+        if (logits[i] > max_val) {
+            max_val = logits[i];
+        }
+    }
+    
+    // 각 원소에 대해 exp(logit - max_val)을 계산하고 합산
+    float sum_exp = 0.0f;
+    for (int i = 0; i < length; i++) {
+        probabilities[i] = expf(logits[i] - max_val);
+        sum_exp += probabilities[i];
+    }
+    
+    // 확률값으로 정규화
+    for (int i = 0; i < length; i++) {
+        probabilities[i] /= sum_exp;
+    }    
 }
 
 ////////////////////////////////////// layer별 size //////////////////////////////////////
@@ -314,9 +329,10 @@ const int size[] = {
 
 const int enc_size = embed_dim * ((img_size / patch_size) * (img_size / patch_size)+1);
 
-void ViT_seq(ImageData *image, Weight *network){
-    networks = network;
-    int tokens = ((img_size / patch_size) * (img_size / patch_size)+1);
+////////////////////////////////////// Model Architecture //////////////////////////////////////
+void ViT_seq(ImageData *image, Network *networks, float **probabilities){
+
+    int token_size = ((img_size/patch_size) * (img_size/patch_size) + 1);
     float *layer[4];
     float *enc_layer[12];
     float *enc_output;
@@ -329,53 +345,45 @@ void ViT_seq(ImageData *image, Weight *network){
     }
     enc_output = (float*)malloc(sizeof(float)*enc_size);
 
-    
-    ////////////////////////////////////////////////////////////////////////////////////////////////
-    ////////////////////////////////////// Model Architecture //////////////////////////////////////
-    ////////////////////////////////////////////////////////////////////////////////////////////////
     for(int i=0; i<image->n; i++){
-        
         /*patch embedding*/
-        Conv2d(image[i].data, layer[0]);
+        Conv2d(image[i].data, layer[0], networks[1], networks[2]);
         
         /*flatten and transpose*/
         flatten_transpose(layer[0], layer[1]);
 
         /*prepend class token*/
-        class_token(layer[1], layer[2]);
+        class_token(layer[1], layer[2], networks[0]);
 
         /*position embedding*/
-        pos_emb(layer[2], layer[3]);
+        pos_emb(layer[2], layer[3], networks[3]);
+        
+        /*Encoder - 12 Layers*/
+        // Encoder layer 0
+        Encoder(layer[3], enc_layer[0], networks[4],  networks[5],  networks[6],  networks[7], networks[8],  networks[9],  networks[10], networks[11], networks[12], networks[13], networks[14], networks[15]);
+        Encoder(enc_layer[0], enc_layer[1], networks[16], networks[17], networks[18], networks[19], networks[20], networks[21], networks[22], networks[23], networks[24], networks[25], networks[26], networks[27]);
+        Encoder(enc_layer[1], enc_layer[2], networks[28], networks[29], networks[30], networks[31], networks[32], networks[33], networks[34], networks[35], networks[36], networks[37], networks[38], networks[39]);
+        Encoder(enc_layer[2], enc_layer[3], networks[40], networks[41], networks[42], networks[43], networks[44], networks[45], networks[46], networks[47], networks[48], networks[49], networks[50], networks[51]);
+        Encoder(enc_layer[3], enc_layer[4], networks[52], networks[53], networks[54], networks[55], networks[56], networks[57], networks[58], networks[59], networks[60], networks[61], networks[62], networks[63]);
+        Encoder(enc_layer[4], enc_layer[5], networks[64], networks[65], networks[66], networks[67],networks[68], networks[69], networks[70], networks[71], networks[72], networks[73], networks[74], networks[75]);
+        Encoder(enc_layer[5], enc_layer[6], networks[76], networks[77], networks[78], networks[79], networks[80], networks[81], networks[82], networks[83], networks[84], networks[85], networks[86], networks[87]);
+        Encoder(enc_layer[6], enc_layer[7], networks[88], networks[89], networks[90], networks[91], networks[92], networks[93], networks[94], networks[95], networks[96], networks[97], networks[98], networks[99]);
+        Encoder(enc_layer[7], enc_layer[8], networks[100], networks[101], networks[102], networks[103], networks[104], networks[105], networks[106], networks[107], networks[108], networks[109], networks[110], networks[111]);
+        Encoder(enc_layer[8], enc_layer[9], networks[112], networks[113], networks[114], networks[115], networks[116], networks[117], networks[118], networks[119], networks[120], networks[121], networks[122], networks[123]);
+        Encoder(enc_layer[9], enc_layer[10], networks[124], networks[125], networks[126], networks[127], networks[128], networks[129], networks[130], networks[131], networks[132], networks[133], networks[134], networks[135]);
+        Encoder(enc_layer[10], enc_layer[11], networks[136], networks[137], networks[138], networks[139], networks[140], networks[141], networks[142], networks[143], networks[144], networks[145], networks[146], networks[147]);
 
-        /*Encoder*/
-        Encoder(layer[3], enc_layer[0], 0);
-        Encoder(enc_layer[0], enc_layer[1], 1);
-        Encoder(enc_layer[1], enc_layer[2], 2);
-        Encoder(enc_layer[2], enc_layer[3], 3);
-        Encoder(enc_layer[3], enc_layer[4], 4);
-        Encoder(enc_layer[4], enc_layer[5], 5);
-        Encoder(enc_layer[5], enc_layer[6], 6);
-        Encoder(enc_layer[6], enc_layer[7], 7);
-        Encoder(enc_layer[7], enc_layer[8], 8);
-        Encoder(enc_layer[8], enc_layer[9], 9);
-        Encoder(enc_layer[9], enc_layer[10], 10);
-        Encoder(enc_layer[10], enc_layer[11], 11);
-        layer_norm(enc_layer[11], enc_output, networks[148].data, networks[149].data);
-        for(int i=0; enc_size; i++) printf("%f ", enc_output[i]);
-
-        /* Extract Class Token (첫 번째 토큰만 사용) */
+        layer_norm(enc_layer[11], enc_output, networks[148], networks[149]);
+      
+        /* Token 값 추출 */
         float *cls_token = (float*)malloc(sizeof(float) * embed_dim);
         float *cls_output = (float*)malloc(sizeof(float) * num_classes);
-
         memcpy(cls_token, enc_output, sizeof(float) * embed_dim);
 
-        /* Classification Head (heads.head)
-           networks[150].data: linear layer weight, networks[151].data: linear layer bias */
-        //linear_layer(cls_token, cls_output, 1, embed_dim, num_classes, networks[150].data, networks[151].data);
+        linear_layer(cls_token, cls_output, 1, embed_dim, num_classes, networks[150], networks[151]);
 
-        /* 결과 출력 (classification head의 출력) */
-        // for (int j = 0; j < num_classes; j++){
-        //     printf("%f ", cls_output[j]);
-        // }
+        /* 확률분포 추출 */
+        Softmax(cls_output, probabilities[i], num_classes);
+        printf("%d image classification completed\n", i);
     }
 }

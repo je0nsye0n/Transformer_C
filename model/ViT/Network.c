@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <dirent.h>
+#include <math.h>  // roundf 함수를 사용하기 위해 추가
 
 // 이미지 데이터 정보를 담을 구조체 정의
 typedef struct {
@@ -12,14 +14,10 @@ typedef struct {
     float *data; // 모든 이미지 데이터를 연속된 메모리 공간에 저장 (N x C x H x W)
 } ImageData;
 
-// Weight 정보를 담을 구조체 정의
 typedef struct {
-    char *key;       // 파라미터 이름 (null-terminated)
-    int num_dims;    // 차원 수
-    int *shape;      // 각 차원의 크기 (배열, 길이 num_dims)
-    int num_elements;// 총 원소 개수
-    float *data;     // float 데이터 (num_elements 크기)
-} Weight;
+    float *data;
+    size_t size;   // float 원소 개수
+} Network;
 
 // input.bin 파일의 헤더는 4개의 int32: (n, c, h, w)
 // 이후 float32 데이터가 연속해서 저장되어 있다고 가정합니다.
@@ -93,169 +91,99 @@ ImageData *load_image_data(const char *filename) {
     return images;
 }
 
-// 모든 가중치 파일(all_weights.bin)을 읽어 Weight 구조체 배열로 반환하는 함수
-Weight* load_all_weights(const char *filename, int *num_weights) {
-    FILE *fp = fopen(filename, "rb");
-    if (!fp) {
-        fprintf(stderr, "Error: Unable to open weight file %s\n", filename);
-        return NULL;
+static int parse_index_from_filename(const char *filename) {
+    // filename이 "Weight_"로 시작하는지 확인
+    if (strncmp(filename, "Weight_", 7) != 0) {
+        return -1;
     }
-    // 전체 항목 수 읽기 (int32)
-    int total_entries;
-    if (fread(&total_entries, sizeof(int), 1, fp) != 1) {
-        fprintf(stderr, "Error: Failed to read total entries\n");
-        fclose(fp);
-        return NULL;
+    // "Weight_" 이후부터 '_' 문자가 나올 때까지의 문자열 추출
+    const char *start = filename + 7;
+    const char *end = strchr(start, '_');
+    if (!end) {
+        return -1;
     }
-    
-    // Weight 구조체 배열 할당
-    Weight *weights = (Weight*)malloc(total_entries * sizeof(Weight));
-    if (!weights) {
-        fprintf(stderr, "Error: Memory allocation failed for weights array\n");
-        fclose(fp);
-        return NULL;
-    }
-    
-    for (int i = 0; i < total_entries; i++) {
-        // 키 길이 (int32)
-        int key_length;
-        if (fread(&key_length, sizeof(int), 1, fp) != 1) {
-            fprintf(stderr, "Error: Failed to read key length for weight %d\n", i);
-            // Free already allocated weights
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-        // 키 문자열 읽기
-        weights[i].key = (char*)malloc(key_length + 1);
-        if (!weights[i].key) {
-            fprintf(stderr, "Error: Memory allocation failed for weight key\n");
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-        if (fread(weights[i].key, sizeof(char), key_length, fp) != (size_t)key_length) {
-            fprintf(stderr, "Error: Failed to read weight key string\n");
-            free(weights[i].key);
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-        weights[i].key[key_length] = '\0'; // null-terminate
-        
-        // 차원 수 (int32)
-        if (fread(&weights[i].num_dims, sizeof(int), 1, fp) != 1) {
-            fprintf(stderr, "Error: Failed to read num_dims for weight %s\n", weights[i].key);
-            free(weights[i].key);
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-        // shape 배열 할당 및 읽기
-        weights[i].shape = (int*)malloc(weights[i].num_dims * sizeof(int));
-        if (!weights[i].shape) {
-            fprintf(stderr, "Error: Memory allocation failed for shape of weight %s\n", weights[i].key);
-            free(weights[i].key);
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-        for (int j = 0; j < weights[i].num_dims; j++) {
-            if (fread(&weights[i].shape[j], sizeof(int), 1, fp) != 1) {
-                fprintf(stderr, "Error: Failed to read shape dimension for weight %s\n", weights[i].key);
-                free(weights[i].key);
-                free(weights[i].shape);
-                for (int k = 0; k < i; k++) {
-                    free(weights[k].key);
-                    free(weights[k].shape);
-                    free(weights[k].data);
-                }
-                free(weights);
-                fclose(fp);
-                return NULL;
-            }
-        }
-        // 원소 개수 (int32)
-        if (fread(&weights[i].num_elements, sizeof(int), 1, fp) != 1) {
-            fprintf(stderr, "Error: Failed to read num_elements for weight %s\n", weights[i].key);
-            free(weights[i].key);
-            free(weights[i].shape);
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-        // 데이터 배열 할당 및 읽기 (float32)
-        weights[i].data = (float*)malloc(weights[i].num_elements * sizeof(float));
-        if (!weights[i].data) {
-            fprintf(stderr, "Error: Memory allocation failed for data of weight %s\n", weights[i].key);
-            free(weights[i].key);
-            free(weights[i].shape);
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-        if (fread(weights[i].data, sizeof(float), weights[i].num_elements, fp) != (size_t)weights[i].num_elements) {
-            fprintf(stderr, "Error: Failed to read float data for weight %s\n", weights[i].key);
-            free(weights[i].key);
-            free(weights[i].shape);
-            free(weights[i].data);
-            for (int j = 0; j < i; j++) {
-                free(weights[j].key);
-                free(weights[j].shape);
-                free(weights[j].data);
-            }
-            free(weights);
-            fclose(fp);
-            return NULL;
-        }
-    }
-    fclose(fp);
-    *num_weights = total_entries;
-    return weights;
+    size_t len = end - start;
+    char index_str[16] = {0};
+    if (len >= sizeof(index_str))
+        len = sizeof(index_str) - 1;
+    strncpy(index_str, start, len);
+    index_str[len] = '\0';
+    return atoi(index_str);
 }
 
-// 메모리 해제 함수
-void free_all_weights(Weight *weights, int num_weights) {
-    if (!weights) return;
-    for (int i = 0; i < num_weights; i++) {
-        free(weights[i].key);
-        free(weights[i].shape);
-        free(weights[i].data);
+void load_weights(const char *directory, Network network[], int count) {
+    DIR *dir = opendir(directory);
+    if (!dir) {
+        perror("디렉토리 열기 실패");
+        exit(EXIT_FAILURE);
     }
-    free(weights);
+
+    // network 배열 초기화
+    for (int i = 0; i < count; i++) {
+        network[i].data = NULL;
+        network[i].size = 0;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        // 파일명이 "Weight_"로 시작하는지 확인
+        if (strncmp(entry->d_name, "Weight_", 7) != 0)
+            continue;
+        // 확장자가 ".bin"인지 확인
+        const char *ext = strrchr(entry->d_name, '.');
+        if (!ext || strcmp(ext, ".bin") != 0)
+            continue;
+
+        int idx = parse_index_from_filename(entry->d_name);
+        if (idx < 0 || idx >= count)
+            continue;
+
+        // 전체 경로 생성: 예) "./Network/Weight_96_encoder_layers_encoder_layer_7_mlp_0_weight.bin"
+        char filepath[512];
+        snprintf(filepath, sizeof(filepath), "%s/%s", directory, entry->d_name);
+
+        // 파일을 바이너리 읽기 모드로 열기
+        FILE *fp = fopen(filepath, "rb");
+        if (!fp) {
+            perror("파일 열기 실패");
+            continue;
+        }
+
+        // 파일 크기 확인 (바이트 단위)
+        fseek(fp, 0, SEEK_END);
+        long file_size = ftell(fp);
+        rewind(fp);
+        if (file_size < 0) {
+            fclose(fp);
+            continue;
+        }
+        // 파일이 float 배열이라고 가정하므로 float 원소 개수 계산
+        size_t num_floats = file_size / sizeof(float);
+
+        // float 배열을 저장할 메모리 할당
+        float *buffer = (float *)malloc(file_size);
+        if (!buffer) {
+            perror("메모리 할당 실패");
+            fclose(fp);
+            exit(EXIT_FAILURE);
+        }
+        size_t read_size = fread(buffer, sizeof(float), num_floats, fp);
+        if (read_size != num_floats) {
+            perror("파일 읽기 오류");
+            free(buffer);
+            fclose(fp);
+            continue;
+        }
+        fclose(fp);
+
+        // 각 float 값을 소수점 6자리까지 반올림
+        for (size_t i = 0; i < num_floats; i++) {
+            buffer[i] = roundf(buffer[i] * 1000000.0f) / 1000000.0f;
+        }
+
+        // 인덱스에 해당하는 위치에 데이터와 크기를 저장
+        network[idx].data = buffer;
+        network[idx].size = num_floats;
+    }
+    closedir(dir);
 }

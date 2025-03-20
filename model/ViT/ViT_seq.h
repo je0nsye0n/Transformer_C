@@ -1,7 +1,8 @@
 #include "Network.h"
 
-#ifndef _Vit_H
-#define _Vit_H
-void ViT_seq(ImageData *image, Weight *network);
+
+#ifndef _ViT_seq_H
+#define _ViT_seq_H
+void ViT_seq(ImageData *image, Network *networks, float **prb);
 
 #endif
